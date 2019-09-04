@@ -108,6 +108,10 @@ int main() {
           int prev_path_size = previous_path_x.size();
           int lane = 1;//0-left,1-center,2-right. 2+lane*4 is Frenet d
 
+          if(prev_path_size>0){
+            car_s = end_path_s;
+          }
+
           //update waypoints
           double ref_x = car_x;
           double ref_y = car_y;
