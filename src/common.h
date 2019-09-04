@@ -5,6 +5,8 @@
 
 const double WP_STRIDE = 30;//meters
 const unsigned int ADD_WP_NUM = 3;//additional wp number
+const double MAX_VEL = 49.5;
+const double MAX_ACC = 0.224;
 
 struct sWayPoints{
     vector<double> x_vec;
