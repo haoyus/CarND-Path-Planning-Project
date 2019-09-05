@@ -9,7 +9,7 @@ Self-Driving Car Engineer Nanodegree Program
 5. The car stays in its lane, except for the time between changing lanes.    --- YES
 6. The car is able to change lanes.                                          --- YES
 
-## Key components of my approach
+## Key components of my approach in main.cpp
 1. Slow in path vehicle detection (line 148 - 159)
 This part of code uses sensor fution output to search for a slow in path vehicle.
 
