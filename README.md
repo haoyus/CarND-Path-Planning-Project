@@ -19,18 +19,18 @@ This part of code uses sensor fusion output to search for vehicles within a cert
 3. Finite State Machine (line 178 - 220)
 This is the key algorithm of planner, it has 3 states:
 
-I. LaneKeep;
-II. PrepareLaneChange;
-III. DuringLaneChange.
+        I. LaneKeep;
+        II. PrepareLaneChange;
+        III. DuringLaneChange.
 
-I is the default state, the action is to follow Speed limit. Under condition "slow in path vehicle", FSM will transit to State II.
+        I is the default state, the action is to follow Speed limit. Under condition "slow in path vehicle", FSM will transit to State II.
 
-II will examine the following conditions:
-cond-II-a: if the car is already during a lane change. If true, transit to III with no action;
-cond-II-b: if the car is not during lane change, and lane opening available. If true, take action of lane change and transit to III.
-cond-II-c: if the car is not during lane change, and lane opening unavailable. Take default action: follow slow car.
+        II will examine the following conditions:
+        cond-II-a: if the car is already during a lane change. If true, transit to III with no action;
+        cond-II-b: if the car is not during lane change, and lane opening available. If true, take action of lane change and transit to III.
+        cond-II-c: if the car is not during lane change, and lane opening unavailable. Take default action: follow slow car.
 
-III will examine condition "slow in target path vehicle", if true, take action of following that car with NO additional lane change allowed. Otherwise, will transit to I.
+        III will examine condition "slow in target path vehicle", if true, take action of following that car with NO additional lane change allowed. Otherwise, will transit to I.
 
 4. Map waypoints calculator (line 222 - 263)
 This part of code calculates planned way points in Global X-Y coordinates, using previous path points, incremented Frenet S from end of previous path, and Frenet D determined by target lane index, which is determined by the FSM.
