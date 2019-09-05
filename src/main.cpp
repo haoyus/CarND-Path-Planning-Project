@@ -55,8 +55,13 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
+  // init ref spd and ego lane label
+  double ref_spd_mph = 0;//base_spd_mph-car_speed>1 ? base_spd_mph : car_speed;
+  int lane = 1;//HV lane index: 0-left,1-center,2-right. 2+lane*4 is Frenet d
+
+
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy]
+               &map_waypoints_dx,&map_waypoints_dy,&ref_spd_mph,&lane]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -99,70 +104,178 @@ int main() {
            * TODO: define a path made up of (x,y) points that the car will visit
            *   sequentially every .02 seconds
            */
-          // initialize
-          double base_spd_mph = 49.5;
-          double ref_spd_mph = base_spd_mph;//base_spd_mph-car_speed>1 ? base_spd_mph : car_speed;
-          double ref_spd_mps = mph2mps(ref_spd_mph);
 
+          /****************** initialize **********************/
           double car_yaw_rad = deg2rad(car_yaw);
-          int prev_path_size = previous_path_x.size();
-          int lane = 1;//0-left,1-center,2-right. 2+lane*4 is Frenet d
+          int prev_path_size = previous_path_x.size();          
+          sLaneStatus hvLeftLane(LL_LEFT);//describes neighbor lane space availability for FSM
+          sLaneStatus hvRighLane(LL_RIGH);
+          sLaneStatus hvOwnnLane(LL_CENT);
+          hvOwnnLane.isExist = true;
+          hvOwnnLane.isOpen = true;
+          switch(lane){
+            case 0: hvLeftLane.isExist = false;
+                    hvRighLane.isExist = true;
+                    break;
+            case 1: hvLeftLane.isExist = true;
+                    hvRighLane.isExist = true;
+                    break;
+            case 2: hvLeftLane.isExist = true;
+                    hvRighLane.isExist = false;
+                    break;
+            default:
+                    break;
+          }
+          hvLeftLane.isOpen = true;
+          hvRighLane.isOpen = true;
 
-          if(prev_path_size>0){
-            car_s = end_path_s;
+          double pred_hv_s = prev_path_size>0 ? end_path_s : car_s;
+
+          /********** Sensing to get surrounding vehicles ************/
+          bool too_close = false;
+          bool too_fast = false;
+
+          //TODO: design vehicle sorting and selection module to get nearest front and rear cars in 3 lanes
+          for(const auto& rv : sensor_fusion){
+            double d = rv[6];
+            double vx = rv[3];
+            double vy = rv[4];
+            double rv_vel = getSpd(vx,vy);
+            double rv_s = rv[5];
+            double check_s = rv_s;
+            check_s = rv_s + prev_path_size*0.02*rv_vel;
+            
+            // if rv in hv lane or hv target lane and slow: FSM will look for LC possibility
+            if(d>lane2d(lane)-2 && d<lane2d(lane)+2){
+              if(check_s>pred_hv_s && check_s-pred_hv_s<FOLLOW_DIST){
+                too_close = true;
+                //ref_spd_mph = mps2mph(rv_vel);
+                if(rv_vel<ref_spd_mph){
+                  too_fast = true;
+                  cout<<"Slow car "<<d<<endl;
+                  //cout<<"Front car in: "<<rv_s-car_s<<"m, spd "<<rv_vel/0.447<<", hv spd "<<car_speed<<", ref spd "<<ref_spd_mph<<endl;
+                }
+              }
+            }
+            // locate RVs laterally in global, to determine open status of each lane
+            // only deal with RVs within a certain longitudinal range
+            if(hvLeftLane.isExist){
+              if(d>lane2d(lane-1)-2 && d<lane2d(lane-1)+2){
+                if(check_s<pred_hv_s+30 && check_s>pred_hv_s-10 && rv_s>car_s-8){
+                  hvLeftLane.isOpen = false;
+                }
+              }
+            }
+            if(hvRighLane.isExist){
+              if(d>lane2d(lane+1)-2 && d<lane2d(lane+1)+2){
+                if(check_s<pred_hv_s+30 && check_s>pred_hv_s-10 && rv_s>car_s-8){
+                  hvRighLane.isOpen = false;
+                }
+              }
+            }
           }
 
-          //update waypoints
+          /************* Finite State Machine implementation **********************/
+          //Slow car in front
+          //Activate STATE 2: PrepareLaneChange
+          if(too_close){
+            if(too_fast){
+              //STATE 2: PrepareLaneChange
+              //
+              // check if hv is during a LaneChange, if not, look for LC
+              if(fabs(car_d-end_path_d)<1.0){
+                //NOT DuringLaneChange
+                //look at lane space opening and make lane change or follow
+                //TODO: select left or righ lane change based on lane speed
+                if(laneChangeOK(hvLeftLane)){
+                  cout<<"LC Left"<<endl;
+                  lane--;//action: make lane change, FSM will go to State 3 in next time cycle
+                }
+                else if(laneChangeOK(hvRighLane)){
+                  cout<<"LC Right"<<endl;
+                  lane++;//action: make lane change, FSM will go to State 3 in next time cycle
+                }
+                //DEFAULT action of STATE 2
+                else{
+                  cout<<"Follow"<<endl;
+                  ref_spd_mph -= MAX_ACC;//no LC available, action: stay in STATE 2, follow slow car
+                }
+              }
+              //STATE 3: DuringLaneChange
+              //action in this state is : follow and finish path, slow down if slow car in path, NO LC ALLOWED 
+              //need to finish this lane change before any further lane changes
+              //if there's a slow car in Target lane, need to follow
+              //if there's not, FSM will go to STATE 1
+              else{
+                cout<<"Slow car in target lane during LaneChange"<<endl;
+                ref_spd_mph -= MAX_ACC;
+              }
+            }
+          }
+
+          //no slow car in path
+          // DEFAULT STATE 1: LaneKeep
+          else if(ref_spd_mph<MAX_SPD_MPH){
+            ref_spd_mph += MAX_ACC;
+          }
+
+          /****************** update waypoints *************************/
           double ref_x = car_x;
           double ref_y = car_y;
           double ref_yaw_rad = car_yaw_rad;
           sWayPoints wpts;
-          vector<double> wptsx_vec, wptsy_vec;
+          //vector<double> wptsx_vec, wptsy_vec;
 
           if(prev_path_size<2){
             double prev_car_x = car_x - cos(car_yaw_rad);
             double prev_car_y = car_y - sin(car_yaw_rad);
-            wptsx_vec.push_back(prev_car_x);
-            wptsy_vec.push_back(prev_car_y);
-            wptsx_vec.push_back(car_x);
-            wptsy_vec.push_back(car_y);
+            wpts.x_vec.push_back(prev_car_x);
+			      wpts.x_vec.push_back(car_x);
+            wpts.y_vec.push_back(prev_car_y);
+			      wpts.y_vec.push_back(car_y);
           } else {
             ref_x = previous_path_x[prev_path_size-1];
             ref_y = previous_path_y[prev_path_size-1];
             double ref_x_prev = previous_path_x[prev_path_size-2];
             double ref_y_prev = previous_path_y[prev_path_size-2];
             ref_yaw_rad = atan2(ref_y-ref_y_prev,ref_x-ref_x_prev);
-            wptsx_vec.push_back(ref_x_prev);
-            wptsy_vec.push_back(ref_y_prev);
-            wptsx_vec.push_back(ref_x);
-            wptsy_vec.push_back(ref_y);
+            wpts.x_vec.push_back(ref_x_prev);
+            wpts.y_vec.push_back(ref_y_prev);
+            wpts.x_vec.push_back(ref_x);
+            wpts.y_vec.push_back(ref_y);
           }
-          cout<<"prev_num "<<prev_path_size<<"  car_yaw "<<car_yaw <<"  ref_yaw "<< ref_yaw_rad*57.3 <<endl;
+          //cout<<"prev_num "<<prev_path_size<<"  car_yaw "<<car_yaw <<"  ref_yaw "<< ref_yaw_rad*57.3 <<endl;
 
-          //TODO: use next_x_vals.back() to get Frenet, use it as start
-          double next_wp_s = car_s;
+          // fill rest of waypoints
+		      double next_wp_s = car_s;
           double next_wp_d = car_d;
+		      if(prev_path_size>0){
+             next_wp_s = end_path_s;
+          }
+          
           for(int i=0;i<ADD_WP_NUM;++i){
             next_wp_s += WP_STRIDE;
-            //next_wp_d = 2+lane*4;
+            next_wp_d = 2+lane*4;
             vector<double> next_wp = getXY(next_wp_s,next_wp_d,map_waypoints_s,map_waypoints_x,map_waypoints_y);
-            wptsx_vec.push_back(next_wp[0]);
-            wptsy_vec.push_back(next_wp[1]);
+            wpts.x_vec.push_back(next_wp[0]);
+            wpts.y_vec.push_back(next_wp[1]);
           }
+          //cout<<"end_s "<<end_path_s<<"  end_d "<<end_path_d<<"  nex_s "<<next_wp_s<<"  nex_d "<<next_wp_d<<endl;
 
-          //convert waypoints from map coordinate to vehicle coordinate
-          //lcs2vcs(wptsx_vec,wptsy_vec,ref_x,ref_y,ref_yaw_rad);
-          for(int i=0;i<wptsx_vec.size();++i){
-            double tmpx = wptsx_vec[i] - ref_x;
-            double tmpy = wptsy_vec[i] - ref_y;
-            wptsx_vec[i] = tmpx*cos(0-ref_yaw_rad)-tmpy*sin(0-ref_yaw_rad);
-            wptsy_vec[i] = tmpx*sin(0-ref_yaw_rad)+tmpy*cos(0-ref_yaw_rad);
+          /***************** convert waypoints from map coordinate to vehicle coordinate *************/
+          /***************** then run spline fit                                         *************/
+          /***************** then covert them back to Global X-Y and send to simulator   *************/
+          //lcs2vcs(wpts.x_vec,wpts.y_vec,ref_x,ref_y,ref_yaw_rad);
+          for(int i=0;i<wpts.x_vec.size();++i){
+            double tmpx = wpts.x_vec[i] - ref_x;
+            double tmpy = wpts.y_vec[i] - ref_y;
+            wpts.x_vec[i] = tmpx*cos(0-ref_yaw_rad) - tmpy*sin(0-ref_yaw_rad);
+            wpts.y_vec[i] = tmpx*sin(0-ref_yaw_rad) + tmpy*cos(0-ref_yaw_rad);
           }
 
           //spline fit
           tk::spline s_fitter;
-          s_fitter.set_points(wptsx_vec,wptsy_vec);
-
+          s_fitter.set_points(wpts.x_vec,wpts.y_vec);
 
           //update path points
           vector<double> next_x_vals;
@@ -172,15 +285,16 @@ int main() {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           }
-          //TODO: use next_x_vals.back() to get Frenet, use it as start point of look_ahead
-          double look_ahead_x = 30;
+          
+          double look_ahead_x = 30.0;
           double look_ahead_y = s_fitter(look_ahead_x);
           double look_ahead_dist = sqrt(look_ahead_x*look_ahead_x+look_ahead_y*look_ahead_y);
           
           double x_incr = 0, y_incr = 0;
           
+          /****** Get path points in Ego coord, convert them into LCS, then update path points sent to simulator *********/
           for(int i=0;i<50-prev_path_size;++i){
-            double n = look_ahead_dist/(ref_spd_mps*0.02);
+            double n = look_ahead_dist/(mph2mps(ref_spd_mph)*0.02);
             double x_pt = x_incr + look_ahead_x/n;
             double y_pt = s_fitter(x_pt);
             x_incr = x_pt;
@@ -194,6 +308,8 @@ int main() {
             next_x_vals.push_back(x_pt);
             next_y_vals.push_back(y_pt);
           }
+
+          /******* END OF MY ALGORITHM ********/
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
